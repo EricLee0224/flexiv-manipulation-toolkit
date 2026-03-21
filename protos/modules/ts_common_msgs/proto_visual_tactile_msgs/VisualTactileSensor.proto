@@ -1,0 +1,66 @@
+syntax = "proto2";
+package tars.visual_tactile_msgs;
+import "modules/ts_common_msgs/proto_std_msgs/Header.proto";
+
+// 视触觉传感器输出数据
+message VisualTactileSensor
+{
+    required tars.std_msgs.Header header = 1;
+    
+    // 校正图像, shape=(700, 400, 3), BGR 格式
+    optional bytes rectify = 2;
+    optional uint32 rectify_height = 3;  // 700
+    optional uint32 rectify_width = 4;   // 400
+    optional uint32 rectify_channels = 5; // 3
+    
+    // 差分图像, shape=(700, 400, 3), BGR 格式
+    optional bytes difference = 6;
+    optional uint32 difference_height = 7;  // 700
+    optional uint32 difference_width = 8;   // 400
+    optional uint32 difference_channels = 9; // 3
+    
+    // 深度图像, shape=(700, 400), 单位为毫米(mm)
+    optional bytes depth = 10;
+    optional uint32 depth_height = 11;  // 700
+    optional uint32 depth_width = 12;   // 400
+    
+    // 三维力分布, shape=(35, 20, 3)
+    optional bytes force = 13;
+    optional uint32 force_dim0 = 14;  // 35
+    optional uint32 force_dim1 = 15;  // 20
+    optional uint32 force_dim2 = 16;  // 3
+    
+    // 法向力分量, shape=(35, 20, 3)
+    optional bytes force_norm = 17;
+    optional uint32 force_norm_dim0 = 18;  // 35
+    optional uint32 force_norm_dim1 = 19;  // 20
+    optional uint32 force_norm_dim2 = 20;  // 3
+    
+    // 六维合力, shape=(6,)
+    optional bytes force_resultant = 21;
+    optional uint32 force_resultant_dim = 22;  // 6
+    
+    // 切向位移, shape=(26, 14, 2)
+    optional bytes marker_2d = 23;
+    optional uint32 marker_2d_dim0 = 24;  // 26
+    optional uint32 marker_2d_dim1 = 25;  // 14
+    optional uint32 marker_2d_dim2 = 26;  // 2
+    
+    // 当前帧 3D 网格, shape=(35, 20, 3)
+    optional bytes mesh_3d = 27;
+    optional uint32 mesh_3d_dim0 = 28;  // 35
+    optional uint32 mesh_3d_dim1 = 29;  // 20
+    optional uint32 mesh_3d_dim2 = 30;  // 3
+    
+    // 初始 3D 网格, shape=(35, 20, 3)
+    optional bytes mesh_3d_init = 31;
+    optional uint32 mesh_3d_init_dim0 = 32;  // 35
+    optional uint32 mesh_3d_init_dim1 = 33;  // 20
+    optional uint32 mesh_3d_init_dim2 = 34;  // 3
+    
+    // 网格形变向量, shape=(35, 20, 3)
+    optional bytes mesh_3d_flow = 35;
+    optional uint32 mesh_3d_flow_dim0 = 36;  // 35
+    optional uint32 mesh_3d_flow_dim1 = 37;  // 20
+    optional uint32 mesh_3d_flow_dim2 = 38;  // 3
+}

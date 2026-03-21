@@ -1,0 +1,35 @@
+syntax = "proto2";
+
+import "modules/ts_common_msgs/proto_ts_wbd_msgs/TsWbd.proto";
+import "modules/ts_common_msgs/proto_custom_msgs/collect/tscompressedimage.proto";
+import "modules/ts_common_msgs/proto_visual_tactile_msgs/VisualTactileSensor.proto";
+import "modules/tools/cyber2pc/proto/ISuitD.proto";
+
+package apollo.tools.cyber2pc;
+
+message BodyFeedbackData {
+    optional string channel_name = 1;
+    optional tars.ts_wbd_msgs.BodyFeedback feedback = 2;
+}
+
+message CameraImageData {
+    optional string channel_name = 1;
+    optional tars.tscamera_msg.Tscompressedimage image = 2;
+}
+
+message ISuitData {
+    optional string channel_name = 1;
+    optional apollo.tools.cyber2pc.ISuitDSample isuit_data = 2;
+}
+
+message VisualTactileData {
+    optional string channel_name = 1;
+    optional tars.visual_tactile_msgs.VisualTactileSensor visual_tactile = 2;
+}
+
+message Cyber2pcBatch {
+    repeated BodyFeedbackData body_feedback_data = 1;
+    repeated CameraImageData camera_image_data = 2;
+    repeated ISuitData isuit_data = 3;
+    repeated VisualTactileData visual_tactile_data = 4;
+}

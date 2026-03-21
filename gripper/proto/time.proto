@@ -1,0 +1,8 @@
+syntax = "proto2";  
+package tars.basic_msgs;
+
+message time
+{
+    required uint32 sec = 1;
+    required uint32 nsec = 2;
+}

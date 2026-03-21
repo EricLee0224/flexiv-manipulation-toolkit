@@ -1,0 +1,175 @@
+syntax = "proto2";
+import "modules/ts_common_msgs/proto_std_msgs/Header.proto";
+
+package tars.ts_wbd_msgs;
+
+// ========================== 枚举定义 ==========================
+enum StateControlRequest {
+  STATE_REQ_UNSPECIFIED = 0;
+  STATE_REQ_ENABLE      = 1; // 伺服上电/允许运动
+  STATE_REQ_DISABLE     = 2; // 下电/禁止运动
+  STATE_REQ_HOMING      = 3; // 回零/校准
+  STATE_REQ_ESTOP       = 4; // 急停
+}
+
+enum StateControlStatus {
+  STATE_STATUS_UNSPECIFIED = 0; // 未指定
+  STATE_STATUS_DISABLED    = 1; // 下电/禁止
+  STATE_STATUS_ENABLED     = 2; // 上电/使能
+  STATE_STATUS_HOMING      = 3; // 回零/校准中
+  STATE_STATUS_FAULT       = 4; // 故障
+  STATE_STATUS_ESTOP       = 5; // 急停
+  STATE_STATUS_TIMEOUT     = 6; // 通讯超时
+}
+
+// ========================== 写侧：控制 ==========================
+
+message JointControl {
+  optional double position = 1; // 位置设定 rad
+  optional double velocity = 2; // 速度设定 rad/s
+  optional double torque   = 3; // 力矩设定 Nm
+  optional double kp       = 4; // 位置环比例增益
+  optional double kd       = 5; // 位置环微分增益
+}
+
+message JointCommand {
+  optional string              joint_name    = 1; // 关节名
+  optional uint32              seq           = 2; // 序号
+  optional uint64              timestamp_ns  = 3; // 纳秒时间戳
+  optional StateControlRequest state_request = 4; // 状态控制请求
+  repeated JointControl        controls      = 5; // 控制点（可多采样/多DOF）
+}
+
+message ChassisControl {
+  optional double linear_x  = 1; // m/s
+  optional double linear_y  = 2; // m/s
+  optional double angular_z = 3; // rad/s
+}
+
+message ChassisCommand {
+  optional uint32              seq           = 1; // 序号
+  optional uint64              timestamp_ns  = 2; // 纳秒时间戳
+  optional StateControlRequest state_request = 3; // 状态控制请求
+  repeated ChassisControl      controls      = 4; // 控制点（可多采样）
+}
+
+message BodyCommands {
+  optional tars.std_msgs.Header header = 1; // 头部信息
+  repeated JointCommand   joints  = 2; // 多个关节命令
+  optional ChassisCommand chassis = 3; // 底盘命令
+}
+
+// ========================== 读侧：反馈 ==========================
+
+message JointMeasurement {
+  optional uint32 seq          = 1; // 序号
+  optional uint64 timestamp_ns = 2; // 纳秒时间戳
+  optional double position     = 3; // rad
+  optional double velocity     = 4; // rad/s
+  optional double torque       = 5; // Nm
+
+  // 来自执行器实时数据（如 CAN 0x9C）
+  optional double current      = 6; // 电流(A)（如是原始 iq，可在上层换算）
+  optional uint32 encoder      = 7; // 编码器原始值
+}
+
+message PoseMeasurement {
+  optional double x  = 1; // m
+  optional double y  = 2; // m
+  optional double z  = 3; // m
+  optional double qx = 4;
+  optional double qy = 5;
+  optional double qz = 6;
+  optional double qw = 7;
+}
+
+message PoseFeedback {
+  optional string name = 1; //   link name
+  optional uint32 seq          = 2; // 序号
+  optional uint64 timestamp_ns = 3; // 纳秒时间戳
+  optional PoseMeasurement pose = 4; // 位姿测量值
+}
+
+// TCP PoseMeasurement X,Y,Z,R_X,R_Y,R_Z in rad
+message TCPPoseMeasurement {
+  optional double x    = 1; // m
+  optional double y    = 2; // m
+  optional double z    = 3; // m
+  optional double r_x  = 4; // rad
+  optional double r_y  = 5; // rad
+  optional double r_z  = 6; // rad
+}
+
+// TCP TorqueMeasurement Fx,Fy,Fz,Mx,My,Mz in N and Nm
+message TCPTorqueMeasurement {
+  optional double f_x = 1; // N
+  optional double f_y = 2; // N
+  optional double f_z = 3; // N
+  optional double m_x = 4; // Nm
+  optional double m_y = 5; // Nm
+  optional double m_z = 6; // Nm
+}
+
+// TCP
+message TCPFeedback {
+  optional string name = 1; //   TCP name
+  optional uint32 seq          = 2; // 序号
+  optional uint64 timestamp_ns = 3; // 纳秒时间戳
+  optional TCPPoseMeasurement   pose    = 4; // 位姿测量值
+  optional TCPTorqueMeasurement torque  = 5; // 力矩测量值
+}
+
+message ActuatorStatus {
+  optional uint32 id            = 1; // 执行器 ID
+  optional uint32 temperature_c = 2; // ℃（如需小数/负值可改为 double 或 int32）
+  optional uint32 current_a     = 3; // A（如需小数可改为 double）
+  optional bool   limit_pos     = 4; // 正向限位
+  optional bool   limit_neg     = 5; // 反向限位
+  repeated string faults        = 6; // 可读性故障文本（可选）
+  optional uint32 customize     = 7; // 自定义状态量
+}
+
+message JointStatus {
+  optional StateControlStatus  state_status       = 1; // 当前状态
+  optional StateControlRequest state_request_echo = 2; // 最近请求回显（可选）
+  optional bool                limit_pos          = 3; // 正向限位
+  optional bool                limit_neg          = 4; // 反向限位
+  optional uint32              error_bits         = 5; // 错误位掩码
+  repeated ActuatorStatus      actuators          = 6; // 执行器状态（可选）
+}
+
+message JointFeedback {
+  optional string            joint_name   = 1; // 关节名
+  optional JointStatus       status       = 2; // 关节状态
+  repeated JointMeasurement  measurements = 3; // 测量值序列（可多采样/多DOF）
+}
+
+message ChassisMeasurement {
+  optional uint32 seq          = 1; // 序号
+  optional uint64 timestamp_ns = 2; // 纳秒时间戳
+  optional double linear_x     = 3; // m/s
+  optional double linear_y     = 4; // m/s
+  optional double angular_z    = 5; // rad/s
+}
+
+message ChassisStatus {
+  optional StateControlStatus  state_status       = 1; // 当前状态
+  optional StateControlRequest state_request_echo = 2; // 最近请求回显（可选）
+  optional string              error_message      = 3; // 错误文本（可选）
+}
+
+message ChassisFeedback {
+  optional ChassisStatus        status        = 1; // 底盘状态
+  repeated ChassisMeasurement   measurements  = 2; // 测量值序列（可多采样）
+}
+
+message BodyFeedback {
+  optional tars.std_msgs.Header header = 1; // 头部信息
+  repeated JointFeedback   joints  = 2; // 多个关节反馈
+  optional ChassisFeedback chassis = 3; // 底盘反馈
+  repeated PoseFeedback         poses    = 4; // 多个位姿反馈
+  repeated TCPFeedback          tcps     = 5; // 多个TCP反馈
+  repeated JointCommand    joint_command_echoes   = 6; // 关节命令回声
+  optional ChassisCommand  chassis_command_echo   = 7; // 底盘命令回声
+  repeated PoseFeedback    pose_echoes            = 8; // 期望位姿回声
+}

@@ -1,0 +1,11 @@
+syntax = "proto2";  
+package tars.std_msgs;
+
+import "modules/ts_common_msgs/proto_basic_msgs/time.proto";
+
+message Header 
+{
+    required uint32 seq = 1;
+    required tars.basic_msgs.time  stamp = 2;
+    required string frame_id = 3;
+}

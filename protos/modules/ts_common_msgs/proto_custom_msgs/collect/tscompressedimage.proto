@@ -1,0 +1,33 @@
+syntax = "proto2";  
+package tars.tscamera_msg;
+import "modules/ts_common_msgs/proto_std_msgs/Header.proto";  
+
+message Tscompressedimage 
+{
+    enum TYPE 
+    {
+        JPEG = 0; 
+        H265_I = 1; 
+        H265_P = 2; 
+    }
+
+    enum CLIP_ATTACH_TYPE  
+    {
+        CLIP_NOT_BELONG = 0; 
+        CLIP_BELONG     = 1; 
+    }
+
+    required tars.std_msgs.Header header = 1; 
+    required TYPE type                        = 2; 
+    required bytes data                       = 3; 
+    optional CLIP_ATTACH_TYPE attach_type     = 4[default = CLIP_BELONG]; 
+    optional int32 target_expose_time         = 5;
+    optional int32 real_expose_time           = 6;
+}
+
+message TscompressedimageInfo
+{
+    required tars.std_msgs.Header header = 1; 
+    optional int32 target_expose_time         = 2;
+    optional int32 real_expose_time           = 3;
+}

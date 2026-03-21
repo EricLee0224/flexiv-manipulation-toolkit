@@ -1,0 +1,27 @@
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+*.eggs/
+dist/
+build/
+
+# Dataset (too large for git)
+dataset/
+
+# Generated proto Python files are kept (needed to run without protoc)
+# proto_py/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary
+*.mp4
+/tmp/

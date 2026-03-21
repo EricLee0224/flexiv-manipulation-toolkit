@@ -1,0 +1,68 @@
+syntax = "proto2";
+
+package apollo.tools.cyber2pc;
+
+message ISuitDMag {
+  optional uint32 seq = 1;          // 0-255
+  optional uint32 flags = 2;
+  optional float mx = 3;            // scaled to SI-ish unit (same as python: /1000)
+  optional float my = 4;
+  optional float mz = 5;
+}
+
+message ISuitDAngle {
+  optional uint32 seq = 1;          // 0-255
+  optional uint32 flags = 2;
+  optional float angle_deg = 3;     // /100
+}
+
+message ISuitDAnchor {
+  optional uint32 seq_anchor = 1;   // 0-255
+  optional uint32 anchor_flags = 2;
+  optional int64 ts_anchor_ms = 3;  // MCU time base
+  optional uint32 bad_crc = 4;
+}
+
+message ISuitDPerf {
+  optional uint64 rx_frames_total = 1;
+  optional uint64 rx_bytes_total = 2;
+
+  optional uint64 gap_count = 3;
+  optional uint64 lost_count = 4;
+  optional uint64 dup_count = 5;
+  optional uint64 err_resync = 6;
+  optional uint64 ring_overrun_count = 7;
+  optional uint64 per_id_mono_errors = 8;
+
+  // latency stats (ACC/GYRO pair completion latency in receiver)
+  optional uint64 lat_count = 9;
+  optional double lat_mean_ms = 10;
+  optional double lat_min_ms = 11;
+  optional double lat_p50_ms = 12;
+  optional double lat_p95_ms = 13;
+  optional double lat_p99_ms = 14;
+  optional double lat_max_ms = 15;
+}
+
+message ISuitDSample {
+  optional uint32 seq = 1;          // 0-255
+  optional int64 t_mcu_ms = 2;      // derived from anchor; -1 if NA
+
+  optional float ax = 3;
+  optional float ay = 4;
+  optional float az = 5;
+
+  optional float gx = 6;
+  optional float gy = 7;
+  optional float gz = 8;
+
+  optional ISuitDMag mag = 9;       // present when available for this seq
+  optional ISuitDAngle angle = 10;  // present when available for this seq
+
+  optional ISuitDAnchor anchor = 11;
+  optional ISuitDPerf perf = 12;    // snapshot (lightweight)
+
+  // receiver state for debugging
+  optional uint32 expected_seq = 13;
+  optional bool locked_aligned = 14;
+}
