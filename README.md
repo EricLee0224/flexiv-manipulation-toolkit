@@ -1,4 +1,4 @@
-# Flexiv Dual-Arm Manipulation Toolkit
+# Flexiv Manipulation Toolkit
 
 Kinesthetic demonstration data collection, replay, and visualization system for dual Flexiv Rizon4s arms with multi-camera observation from an NVIDIA Orin edge computer.
 
