@@ -35,7 +35,7 @@ STRIP_W, STRIP_H = 960, 300
 VIDEO_W = CAM_W * 2 + VIEW3D_W   # 1920
 VIDEO_H = CAM_H * 2              # 720
 
-TRAIL_LEN = 60                    # frames of trail in 3D view
+TRAIL_LEN = 100                    # frames of trail in 3D view
 AXIS_LEN = 0.04                   # orientation arrow length (metres)
 
 LEFT_BGR  = (60, 60, 230)         # warm red

@@ -10,7 +10,7 @@ if __name__ == "__main__":
         while True:
             feedback = controller.get_feedback()
             print(f"{controller.name()}: position={feedback.position}, velocity={feedback.velocity}, torque={feedback.torque}, seq={feedback.seq}, timestamp_sec={feedback.timestamp_sec}, timestamp_nsec={feedback.timestamp_nsec}")
-            controller.try_control(position=0.8, velocity=0.0, torque=0.0)
+            controller.try_control(position=0.5, velocity=0.0, torque=0.0)
             time.sleep(1.0)
     except KeyboardInterrupt:
         controller.stop()

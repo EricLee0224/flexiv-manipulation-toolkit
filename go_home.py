@@ -1,68 +1,79 @@
-# go_home.py
+"""Move one or both Flexiv arms to home position via a tablet plan."""
 
-import config
+import argparse
+import sys
+
 from robot.flexiv import FlexivRobot
+import config
 
 
-def select_robot():
-    """
-    Select one robot by logical ID.
-    """
-    print("Available robots:")
-    for rid, sn in config.SN_MAP.items():
-        print(f"  {rid} -> {sn}")
+def parse_args():
+    parser = argparse.ArgumentParser(description="Move Flexiv arms to home position.")
+    parser.add_argument(
+        "--arm",
+        choices=["left", "right", "both"],
+        default="both",
+        help="Which arm(s) to move home (default: both)",
+    )
+    parser.add_argument(
+        "--left-sn",
+        default=config.SN_MAP[config.LEFT_ARM_ID],
+        help=f"Left arm serial number (default: {config.SN_MAP[config.LEFT_ARM_ID]})",
+    )
+    parser.add_argument(
+        "--right-sn",
+        default=config.SN_MAP[config.RIGHT_ARM_ID],
+        help=f"Right arm serial number (default: {config.SN_MAP[config.RIGHT_ARM_ID]})",
+    )
+    parser.add_argument(
+        "--plan",
+        default="ReturnNewHome",
+        help="Plan name to execute (default: ReturnNewHome)",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=120.0,
+        help="Timeout in seconds for the plan to finish (default: 120)",
+    )
+    return parser.parse_args()
 
-    while True:
-        robot_id = input("Select robot ID (A/B/C/D): ").strip().upper()
-        if robot_id in config.SN_MAP:
-            return robot_id, config.SN_MAP[robot_id]
-        print("Invalid robot ID, please try again.")
 
-
-def initialize_robot(robot_sn):
-    """
-    Initialize robot connection by serial number.
-    """
+def go_home(robot: FlexivRobot, label: str, plan_name: str, timeout: float) -> bool:
     try:
-        robot = FlexivRobot(robot_sn)
-        return robot
-    except Exception as e:
-        print(f"Failed to initialize robot: {e}")
-        return None
-
-
-def move_to_home(robot):
-    """
-    Move robot to home using the configured tablet plan.
-    """
-    try:
-        print("Executing plan: ReturnNewHome ...")
-        robot.go_home_by_plan(plan_name="ReturnNewHome", timeout=120.0)
-        print("ReturnNewHome finished.")
+        print(f"[{label}] Executing plan: {plan_name} ...")
+        robot.go_home_by_plan(plan_name=plan_name, timeout=timeout)
+        print(f"[{label}] {plan_name} finished.")
         return True
     except Exception as e:
-        print(f"Failed to execute ReturnNewHome: {e}")
+        print(f"[{label}] Failed: {e}")
         return False
 
 
 def main():
-    print("--------------------------- Go Home ---------------------------")
+    args = parse_args()
+    ok = True
 
-    robot_id, robot_sn = select_robot()
-    print(f"Selected robot: ID={robot_id}, SN={robot_sn}")
+    if args.arm in ("left", "both"):
+        print(f"[left] Initializing ({args.left_sn}) ...")
+        robot_left = FlexivRobot(args.left_sn)
+        if not go_home(robot_left, "left", args.plan, args.timeout):
+            ok = False
 
-    robot = initialize_robot(robot_sn)
-    if robot is None:
-        print("Failed to initialize robot, exiting...")
+    if args.arm in ("right", "both"):
+        print(f"[right] Initializing ({args.right_sn}) ...")
+        robot_right = FlexivRobot(args.right_sn)
+        if not go_home(robot_right, "right", args.plan, args.timeout):
+            ok = False
+
+    if ok:
+        print("All arms returned home successfully.")
+    else:
+        print("Some arms failed to return home.")
         return 1
 
-    if not move_to_home(robot):
-        print("Failed to move robot to home, exiting...")
-        return 1
-
-    print(f"Rizon4s ID: {robot_id}, SN: {robot_sn} successfully returned home")
     return 0
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    sys.exit(main())
