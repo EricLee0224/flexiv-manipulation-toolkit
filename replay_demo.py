@@ -45,8 +45,8 @@ import config
 
 MQTT_BROKER_IP = "192.168.20.2"
 MQTT_BROKER_PORT = 1883
-LEFT_GRIPPER_NAME = "gripper2"
-RIGHT_GRIPPER_NAME = "gripper4"
+LEFT_GRIPPER_NAME = "gripper4"
+RIGHT_GRIPPER_NAME = "gripper2"
 
 
 def resolve_hdf5_path(path_str: str) -> Path:

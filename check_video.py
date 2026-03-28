@@ -3,7 +3,7 @@ import h5py
 import cv2
 import numpy as np
 
-file_path = sys.argv[1] if len(sys.argv) > 1 else "dataset/test/episode_004.hdf5"
+file_path = sys.argv[1] if len(sys.argv) > 1 else "dataset/place_tube_0327/episode_000.hdf5"
 
 STEP = 1
 FPS = 30

@@ -161,6 +161,7 @@ def render_strip_base(ts_sec, left_euler, right_euler, gripper_l, gripper_r):
     ax.set_xlabel("Time (s)", fontsize=7)
     ax.set_title("Gripper State", fontsize=8, fontweight="bold")
     ax.legend(fontsize=6, loc="upper right")
+    ax.set_ylim(0.0, 1.0)
     ax.tick_params(labelsize=6)
     ax.grid(True, alpha=0.2)
 

@@ -159,8 +159,13 @@ def main():
                     short = ch.split("/")[-2] if "/" in ch else ch
                     elapsed = time.time() - st["start_time"]
                     fps = st["frames_out"] / elapsed if elapsed > 0 else 0
+                    out = st["frames_out"]
+                    dup = st.get("seq_dup", 0)
+                    recv = st.get("recv_total", 0)
+                    empty = st.get("empty_decode", 0)
                     err = st["errors"]
-                    print(f"  decode [{short}]: {st['frames_out']} frames in {elapsed:.1f}s ({fps:.1f} fps), {err} errors")
+                    total_in = dup + recv
+                    print(f"  decode [{short}]: ws_recv={total_in} seq_dup={dup} unique={recv} decode={out}+{empty}empty | {fps:.1f} fps, {err} err")
 
                 episode_dir = get_next_episode_dir(task_name)
                 print(f"Saving to {episode_dir} ...")
