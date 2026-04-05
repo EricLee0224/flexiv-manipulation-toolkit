@@ -199,6 +199,17 @@ flexiv-manipulation-toolkit/
 
 ## Data Format
 
+### 转为 ARX mobile_aloha ACT 训练格式
+
+`ARX_PLAY_plus/mobile_aloha/train.py` 里的 `EpisodicDataset` 要求**平铺**的 `episode_0.hdf5`, `episode_1.hdf5`, …，且 HDF5 结构与 Flexiv 不同。可先 `build_dataset.py` 生成 `episode.hdf5`，再运行：
+
+```bash
+python convert_to_arx_act_hdf5.py --flexiv_task dataset/<task_name> --out_dir ./arx_act_dataset
+```
+
+默认把 Flexiv 的 `left_cam0/left_cam1/right_cam0` 映射到 ARX 的 `head` / `left_wrist` / `right_wrist`（与 `train.py --camera_names` 默认一致）。**四路观测**时用 `--four_fisheyes`，并在 `train.py` 里加上  
+`--camera_names left_cam0 left_cam1 right_cam0 right_cam1`。转换说明见脚本顶部注释。
+
 ### Raw Per-Source `.pkl` Files
 
 Each source is recorded independently with its own `time.time_ns()` timestamps.

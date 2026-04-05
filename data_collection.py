@@ -9,6 +9,9 @@ from dataset_utils import get_next_episode_dir
 
 import config
 
+GO_HOME_PLAN = "ReturnNewHome"
+GO_HOME_TIMEOUT_S = 120.0
+
 
 def save_arm_pkl(arm_data, path):
     """Stack arm recordings into arrays and save as .pkl."""
@@ -120,6 +123,7 @@ def main():
     print(" s -> disable teach")
     print(" r -> start recording")
     print(" t -> stop recording & save")
+    print(" g -> go home both arms (same plan as go_home.py)")
     print(" q -> quit")
     print("")
 
@@ -146,6 +150,33 @@ def main():
                 observer.start_recording()
                 arm_recorder.start()
                 print("Recording started (all sources independent).")
+
+            elif cmd == "g":
+
+                if arm_recorder.is_running():
+                    print("Cannot go home while recording. Press 't' to stop and save first.")
+                    continue
+
+                arm_left.disable_teach()
+                arm_right.disable_teach()
+                print(
+                    f"Going home both arms (plan={GO_HOME_PLAN}, timeout={GO_HOME_TIMEOUT_S}s) ..."
+                )
+                try:
+                    arm_left.raw().go_home_by_plan(
+                        plan_name=GO_HOME_PLAN, timeout=GO_HOME_TIMEOUT_S
+                    )
+                    print("  Left arm: home plan finished.")
+                except Exception as e:
+                    print(f"  Left arm go_home failed: {e}")
+                try:
+                    arm_right.raw().go_home_by_plan(
+                        plan_name=GO_HOME_PLAN, timeout=GO_HOME_TIMEOUT_S
+                    )
+                    print("  Right arm: home plan finished.")
+                except Exception as e:
+                    print(f"  Right arm go_home failed: {e}")
+                print("Go home done.")
 
             elif cmd == "t":
 

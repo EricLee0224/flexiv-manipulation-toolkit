@@ -33,10 +33,10 @@ HOST = "0.0.0.0"
 PORT = 9002
 
 CAM_CHANNELS = {
-    "/sensor_camera_senyun/bl_fisheye/compressed": "left_cam0",
-    "/sensor_camera_senyun/cl_fisheye/compressed": "left_cam1",
-    "/sensor_camera_senyun/br_fisheye/compressed": "right_cam0",
-    "/sensor_camera_senyun/cr_fisheye/compressed": "right_cam1",
+    "/sensor_camera_senyun/cl_fisheye/compressed": "left_cam0",
+    "/sensor_camera_senyun/cr_fisheye/compressed": "left_cam1",
+    "/sensor_camera_senyun/bl_fisheye/compressed": "right_cam0",
+    "/sensor_camera_senyun/br_fisheye/compressed": "right_cam1",
 }
 
 TARGET_SIZE = (640, 480)

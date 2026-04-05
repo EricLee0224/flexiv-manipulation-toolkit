@@ -28,10 +28,10 @@ PORT = 9003
 # Channels
 # =========================
 CAM_CHANNELS = {
-    "/sensor_camera_senyun/bl_fisheye/compressed": "left_cam0",
-    "/sensor_camera_senyun/cl_fisheye/compressed": "left_cam1",
-    "/sensor_camera_senyun/br_fisheye/compressed": "right_cam0",
-    "/sensor_camera_senyun/cr_fisheye/compressed": "right_cam1",
+    "/sensor_camera_senyun/cl_fisheye/compressed": "left_cam0",
+    "/sensor_camera_senyun/cr_fisheye/compressed": "left_cam1",
+    "/sensor_camera_senyun/bl_fisheye/compressed": "right_cam0",
+    "/sensor_camera_senyun/br_fisheye/compressed": "right_cam1",
 }
 
 GRIPPER_CHANNELS = {
@@ -290,7 +290,7 @@ async def handler(websocket):
                 shared_buffer["cam"]["ts"] = recv_ts
 
         # =========================
-        # GRIPPER
+        # GRIPPER — use Orin header.stamp + same offset as camera
         # =========================
         for item in batch.body_feedback_data:
 
@@ -312,7 +312,13 @@ async def handler(websocket):
                 if pos is None:
                     continue
 
-                ts = time.time_ns()
+                hdr = item.feedback.header
+                orin_ts = int(hdr.stamp.sec) * 1_000_000_000 + int(hdr.stamp.nsec)
+
+                if orin_ts > 0 and _orin_pc_offset is not None:
+                    ts = orin_ts + _orin_pc_offset
+                else:
+                    ts = recv_ts
 
                 side = "left" if "left" in name else "right"
 

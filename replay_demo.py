@@ -30,6 +30,9 @@ Usage:
     # dry run: print commands without connecting to hardware
     python replay_demo.py dataset/place_tube_0322/episode_000 --dry-run
     python replay_demo.py dataset/place_tube_0322/episode_000 --dry-run --sample 20
+
+    # MQTT broker on another host
+    python replay_demo.py dataset/place_tube_0322/episode_000 --mqtt-host 192.168.20.2 --mqtt-port 1883
 """
 
 import sys
@@ -43,8 +46,8 @@ import numpy as np
 import config
 
 
-MQTT_BROKER_IP = "192.168.20.2"
-MQTT_BROKER_PORT = 1883
+DEFAULT_MQTT_HOST = "192.168.20.2"
+DEFAULT_MQTT_PORT = 1883
 LEFT_GRIPPER_NAME = "gripper4"
 RIGHT_GRIPPER_NAME = "gripper2"
 
@@ -103,16 +106,58 @@ def go_home_both(left, right, plan: str):
     print("Both robots at home.")
 
 
-def init_grippers(GripperController):
-    left_g = GripperController(gripper_name=LEFT_GRIPPER_NAME,
-                               broker=MQTT_BROKER_IP, port=MQTT_BROKER_PORT)
-    right_g = GripperController(gripper_name=RIGHT_GRIPPER_NAME,
-                                broker=MQTT_BROKER_IP, port=MQTT_BROKER_PORT)
+def init_grippers(
+    GripperController,
+    broker: str,
+    port: int,
+    connect_timeout: float = 8.0,
+):
+    """Same construction as gripper/main.py: only gripper_name + broker + port."""
+    left_g = GripperController(
+        gripper_name=LEFT_GRIPPER_NAME,
+        broker=broker,
+        port=port,
+    )
+    right_g = GripperController(
+        gripper_name=RIGHT_GRIPPER_NAME,
+        broker=broker,
+        port=port,
+    )
     left_g.start()
     right_g.start()
-    time.sleep(0.5)
-    print(f"Grippers connected: left={LEFT_GRIPPER_NAME}, right={RIGHT_GRIPPER_NAME}")
+
+    deadline = time.time() + connect_timeout
+    while time.time() < deadline:
+        if hasattr(left_g, "is_connected") and hasattr(right_g, "is_connected"):
+            if left_g.is_connected() and right_g.is_connected():
+                break
+        else:
+            break
+        time.sleep(0.05)
+    else:
+        if hasattr(left_g, "is_connected"):
+            print(
+                f"WARN: MQTT not connected within {connect_timeout}s "
+                f"({broker}:{port}). Gripper commands may be dropped until connect."
+            )
+
+    print(
+        f"Grippers MQTT: L={LEFT_GRIPPER_NAME} | R={RIGHT_GRIPPER_NAME} | "
+        f"broker={broker}:{port}"
+    )
     return left_g, right_g
+
+
+def _gripper_send(left_g, right_g, i: int, data: dict) -> tuple[int, int]:
+    """Publish gripper targets; returns (fail_left, fail_right) for this step."""
+    fl = fr = 0
+    if left_g is not None:
+        if not left_g.try_control(position=float(data["left_gripper"][i])):
+            fl = 1
+    if right_g is not None:
+        if not right_g.try_control(position=float(data["right_gripper"][i])):
+            fr = 1
+    return fl, fr
 
 
 def _print_progress(i: int, n: int, start_time: float, dt: float):
@@ -147,6 +192,7 @@ def replay_joint(
     print(f"Replaying {n} frames (joint mode, dt={dt*1000:.1f}ms, ~{total_sec:.1f}s) ...")
 
     replay_start = time.time()
+    gripper_fail = 0
     for i in range(n):
         t0 = time.time()
 
@@ -163,10 +209,8 @@ def replay_joint(
             max_acc=max_acc_vec,
         )
 
-        if left_g is not None:
-            left_g.try_control(position=float(data["left_gripper"][i]))
-        if right_g is not None:
-            right_g.try_control(position=float(data["right_gripper"][i]))
+        fl, fr = _gripper_send(left_g, right_g, i, data)
+        gripper_fail += fl + fr
 
         elapsed = time.time() - t0
         remaining = dt - elapsed
@@ -174,6 +218,10 @@ def replay_joint(
             time.sleep(remaining)
 
         _print_progress(i, n, replay_start, dt)
+
+    if left_g is not None or right_g is not None:
+        if gripper_fail:
+            print(f"WARN: {gripper_fail} gripper MQTT publishes failed (not connected or broker error).")
 
 
 def replay_cartesian(
@@ -196,16 +244,15 @@ def replay_cartesian(
     print(f"Replaying {n} frames (cartesian mode, dt={dt*1000:.1f}ms, ~{total_sec:.1f}s) ...")
 
     replay_start = time.time()
+    gripper_fail = 0
     for i in range(n):
         t0 = time.time()
 
         left_robot.send_cartesian_motion_force(data["left_tcp_pose"][i].tolist())
         right_robot.send_cartesian_motion_force(data["right_tcp_pose"][i].tolist())
 
-        if left_g is not None:
-            left_g.try_control(position=float(data["left_gripper"][i]))
-        if right_g is not None:
-            right_g.try_control(position=float(data["right_gripper"][i]))
+        fl, fr = _gripper_send(left_g, right_g, i, data)
+        gripper_fail += fl + fr
 
         elapsed = time.time() - t0
         remaining = dt - elapsed
@@ -216,6 +263,10 @@ def replay_cartesian(
 
         if i % 300 == 0:
             print(f"  {i}/{n} ({100*i/n:.0f}%)")
+
+    if left_g is not None or right_g is not None:
+        if gripper_fail:
+            print(f"WARN: {gripper_fail} gripper MQTT publishes failed (not connected or broker error).")
 
 
 def fmt_arr(arr, precision=4):
@@ -267,8 +318,12 @@ def dry_run(data: dict, dt: float, args):
         if not args.no_gripper:
             lp = float(data["left_gripper"][i])
             rp = float(data["right_gripper"][i])
-            print(f"  LEFT  gripper  → MQTT {LEFT_GRIPPER_NAME}  position={lp:.4f}")
-            print(f"  RIGHT gripper  → MQTT {RIGHT_GRIPPER_NAME}  position={rp:.4f}")
+            print(
+                f"  LEFT  gripper  → MQTT {LEFT_GRIPPER_NAME}  position={lp:.4f}"
+            )
+            print(
+                f"  RIGHT gripper  → MQTT {RIGHT_GRIPPER_NAME}  position={rp:.4f}"
+            )
 
     # summary stats
     print("\n" + "=" * 80)
@@ -305,6 +360,14 @@ def main():
     parser.add_argument("--max-acc", type=float, default=2.0, help="Joint max acceleration (rad/s²)")
     parser.add_argument("--home-plan", type=str, default="ReturnNewHome", help="Home plan name")
     parser.add_argument("--no-gripper", action="store_true", help="Skip gripper replay")
+    parser.add_argument(
+        "--mqtt-host", type=str, default=DEFAULT_MQTT_HOST,
+        help=f"MQTT broker for gripper commands (default: {DEFAULT_MQTT_HOST})",
+    )
+    parser.add_argument(
+        "--mqtt-port", type=int, default=DEFAULT_MQTT_PORT,
+        help=f"MQTT broker port (default: {DEFAULT_MQTT_PORT})",
+    )
     parser.add_argument("--left-sn", default=None, help="Left arm serial number override")
     parser.add_argument("--right-sn", default=None, help="Right arm serial number override")
     parser.add_argument("--dry-run", action="store_true", help="Print commands without connecting to hardware")
@@ -338,7 +401,11 @@ def main():
 
     left_g, right_g = None, None
     if not args.no_gripper:
-        left_g, right_g = init_grippers(GripperController)
+        left_g, right_g = init_grippers(
+            GripperController,
+            args.mqtt_host,
+            args.mqtt_port,
+        )
 
     input("\nPress ENTER to go home and start replay ...")
 

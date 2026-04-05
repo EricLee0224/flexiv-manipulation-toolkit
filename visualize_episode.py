@@ -42,8 +42,8 @@ LEFT_BGR  = (60, 60, 230)         # warm red
 RIGHT_BGR = (230, 140, 40)        # cool blue
 
 CAM_LABELS = {
-    "left_cam0": "BL Fisheye",  "left_cam1": "CL Fisheye",
-    "right_cam0": "BR Fisheye", "right_cam1": "CR Fisheye",
+    "left_cam0": "CL Fisheye",  "left_cam1": "CR Fisheye",
+    "right_cam0": "BL Fisheye", "right_cam1": "BR Fisheye",
 }
 
 
