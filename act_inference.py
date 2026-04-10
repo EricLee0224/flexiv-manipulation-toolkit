@@ -6,16 +6,24 @@ camera frames from Cyber2PCObserver and joint states from FlexivRobot,
 runs the policy at ~30 Hz, and sends joint commands + gripper targets.
 
 Usage:
-    python act_inference.py --ckpt_dir /path/to/weights
+    python act_inference.py --ckpt_dir /path/to/run_dir
+
+    # pick a specific .ckpt (basename under ckpt_dir, or absolute path)
+    python act_inference.py --ckpt_dir /path/to/run_dir --ckpt policy_epoch_4400_seed_0.ckpt
+    python act_inference.py --ckpt_dir /path/to/run_dir --ckpt /abs/path/to/policy_best.ckpt
+
+    # mobile_aloha 训练默认把「验证最优」存成 best_policy_epoch{N}_policy_best.ckpt（可能没有 policy_best.ckpt）
+    python act_inference.py --ckpt_dir /path/to/mobile_aloha/weights/0410 \\
+        --ckpt best_policy_epoch7904_policy_best.ckpt
 
     # dry run (print actions, no hardware)
-    python act_inference.py --ckpt_dir /path/to/weights --dry-run
+    python act_inference.py --ckpt_dir /path/to/run_dir --dry-run
 
     # custom frequency / chunk
-    python act_inference.py --ckpt_dir /path/to/weights --freq 30
+    python act_inference.py --ckpt_dir /path/to/run_dir --freq 30
 
     # skip gripper
-    python act_inference.py --ckpt_dir /path/to/weights --no-gripper
+    python act_inference.py --ckpt_dir /path/to/run_dir --no-gripper
 """
 
 from __future__ import annotations
@@ -23,6 +31,7 @@ from __future__ import annotations
 import argparse
 import os
 import pickle
+import re
 import sys
 import time
 from pathlib import Path
@@ -92,7 +101,73 @@ HOME_TIMEOUT = 120.0
 # Model loading
 # ===================================================================
 
-def load_act_policy(ckpt_dir: str) -> tuple[ACTPolicy, dict, dict]:
+def _list_ckpt_hint(ckpt_dir: Path, limit: int = 35) -> str:
+    """Append to errors so users see real filenames under the run directory."""
+    if not ckpt_dir.is_dir():
+        return ""
+    names = sorted(f.name for f in ckpt_dir.glob("*.ckpt") if f.is_file())
+    if not names:
+        return f"\n  (no .ckpt files under {ckpt_dir})"
+    tail = ""
+    if len(names) > limit:
+        tail = f"\n  ... and {len(names) - limit} more .ckpt"
+        names = names[:limit]
+    block = "\n  ".join(names)
+    return f"\n  Available .ckpt in {ckpt_dir}:\n  {block}{tail}"
+
+
+def resolve_checkpoint_path(
+    ckpt_dir: Path, train_args: dict, ckpt_user: str | None
+) -> Path:
+    """Pick which .ckpt to load: explicit --ckpt, else policy_best / args ckpt_name."""
+    if ckpt_user:
+        u = ckpt_user.strip()
+        if not u:
+            raise ValueError("--ckpt must be non-empty when provided")
+        p = Path(u).expanduser()
+        if p.is_absolute():
+            if not p.is_file():
+                raise FileNotFoundError(
+                    f"Checkpoint not found: {p}{_list_ckpt_hint(ckpt_dir)}"
+                )
+            return p
+        in_dir = (ckpt_dir / p).resolve()
+        if in_dir.is_file():
+            return in_dir
+        rel_cwd = (Path.cwd() / p).resolve()
+        if rel_cwd.is_file():
+            return rel_cwd
+        raise FileNotFoundError(
+            f"Checkpoint not found: {u!r} (tried {in_dir} and {rel_cwd})"
+            f"{_list_ckpt_hint(ckpt_dir)}"
+        )
+
+    ckpt_name = train_args.get("ckpt_name", "policy_best.ckpt")
+    path_best = ckpt_dir / "policy_best.ckpt"
+    if path_best.is_file():
+        return path_best.resolve()
+    path_named = ckpt_dir / ckpt_name
+    if path_named.is_file():
+        return path_named.resolve()
+
+    # train.py 在验证刷新最优且 epoch>550 时保存为 best_policy_epoch{epoch}_{ckpt_name}
+    best_candidates: list[tuple[int, Path]] = []
+    for f in ckpt_dir.glob("best_policy_epoch*.ckpt"):
+        m = re.match(r"best_policy_epoch(\d+)_(.+)$", f.name)
+        if m and m.group(2) == ckpt_name:
+            best_candidates.append((int(m.group(1)), f))
+    if best_candidates:
+        best_candidates.sort(key=lambda x: x[0])
+        return best_candidates[-1][1].resolve()
+
+    raise FileNotFoundError(
+        f"No checkpoint in {ckpt_dir}: expected policy_best.ckpt, {ckpt_name}, "
+        f"or best_policy_epoch*_{ckpt_name}. Use --ckpt to pick a .ckpt file."
+        f"{_list_ckpt_hint(ckpt_dir)}"
+    )
+
+
+def load_act_policy(ckpt_dir: str, ckpt: str | None = None) -> tuple[ACTPolicy, dict, dict]:
     """Load ACT policy + training args + normalization stats."""
     ckpt_dir = Path(ckpt_dir)
 
@@ -151,10 +226,7 @@ def load_act_policy(ckpt_dir: str) -> tuple[ACTPolicy, dict, dict]:
     policy_config["action_dim"] *= 2
 
     policy = ACTPolicy(policy_config)
-    ckpt_name = train_args.get("ckpt_name", "policy_best.ckpt")
-    ckpt_path = ckpt_dir / "policy_best.ckpt"
-    if not ckpt_path.exists():
-        ckpt_path = ckpt_dir / ckpt_name
+    ckpt_path = resolve_checkpoint_path(ckpt_dir, train_args, ckpt)
     loading_status = policy.load_state_dict(torch.load(ckpt_path, map_location="cpu"))
     print(f"Loaded checkpoint: {ckpt_path}  ({loading_status})")
 
@@ -408,6 +480,15 @@ def inference_loop(args, policy, stats, train_args, observer,
                 all_actions, _ = policy(image_tensor, None, left_s, right_s)
                 # all_actions: (1, chunk_size, action_dim)
 
+                if t % 4 == 0:
+                    chunk_raw = all_actions[0].cpu().numpy()  # (chunk_size, action_dim)
+                    chunk_denorm = chunk_raw * stats["action_std"] + stats["action_mean"]
+                    lg_chunk = chunk_denorm[:, LEFT_GRIPPER_IDX]
+                    rg_chunk = chunk_denorm[:, RIGHT_GRIPPER_IDX]
+                    np.set_printoptions(precision=4, linewidth=200, suppress=True)
+                    print(f"  t={t:5d}  chunk L_grip={lg_chunk}")
+                    print(f"         chunk R_grip={rg_chunk}")
+
                 if temporal_agg:
                     raw = temporal_agg_step(
                         all_time_actions, t,
@@ -434,6 +515,17 @@ def inference_loop(args, policy, stats, train_args, observer,
                 if sleep_time > 0:
                     time.sleep(sleep_time)
 
+                if t > 0 and t % 4 == 0:
+                    lg_cmd = action_16[LEFT_GRIPPER_IDX]
+                    rg_cmd = action_16[RIGHT_GRIPPER_IDX]
+                    if not dry_run:
+                        gbuf = observer.get_gripper()
+                        lg_obs = float(gbuf["left"][-1]["pos"]) if gbuf["left"] else float("nan")
+                        rg_obs = float(gbuf["right"][-1]["pos"]) if gbuf["right"] else float("nan")
+                        print(f"  t={t:5d}  gripper cmd L={lg_cmd:.4f} R={rg_cmd:.4f}  obs L={lg_obs:.4f} R={rg_obs:.4f}")
+                    else:
+                        print(f"  t={t:5d}  gripper cmd L={lg_cmd:.4f} R={rg_cmd:.4f}")
+
                 if t > 0 and t % 100 == 0:
                     actual_hz = 1.0 / max(time.time() - t0, 1e-6)
                     print(f"  step {t}/{max_steps}  loop={elapsed*1000:.1f}ms  ~{actual_hz:.0f}Hz")
@@ -451,7 +543,18 @@ def inference_loop(args, policy, stats, train_args, observer,
 def parse_args():
     p = argparse.ArgumentParser(description="ACT policy inference on Flexiv dual arms")
     p.add_argument("--ckpt_dir", type=str, required=True,
-                   help="Directory with policy_best.ckpt, args.yaml, dataset_stats.pkl")
+                   help="Run directory with args.yaml, dataset_stats.pkl, and .ckpt files")
+    p.add_argument(
+        "--ckpt",
+        type=str,
+        default=None,
+        help=(
+            "Which checkpoint to load. "
+            "If set: basename or relative path is resolved under --ckpt_dir first, "
+            "then current working directory; absolute path is accepted. "
+            "If omitted: policy_best.ckpt if present, else ckpt_name from args.yaml."
+        ),
+    )
     p.add_argument("--max-steps", type=int, default=10000, help="Max inference steps")
     p.add_argument("--freq", type=float, default=30.0, help="Control loop frequency (Hz)")
     p.add_argument("--max-vel", type=float, default=1.0, help="Joint max velocity (rad/s)")
@@ -471,7 +574,7 @@ def main():
     args = parse_args()
 
     # 1. Load model
-    policy, stats, train_args = load_act_policy(args.ckpt_dir)
+    policy, stats, train_args = load_act_policy(args.ckpt_dir, args.ckpt)
 
     # 2. Start camera/gripper receiver
     from ee.cyber2pc_observer import Cyber2PCObserver
