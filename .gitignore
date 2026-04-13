@@ -22,6 +22,9 @@ dataset/
 .DS_Store
 Thumbs.db
 
+# Third-party compiled deps (install separately, see README)
+librealsense/
+
 # Temporary
 *.mp4
 /tmp/

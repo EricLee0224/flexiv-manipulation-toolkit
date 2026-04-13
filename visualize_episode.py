@@ -1,10 +1,10 @@
 """
 Full-element episode visualization with 3D EE workspace view.
 
-Layout (1920×720):
-  Left  (960×720)  :  2×2 camera grid
-  Right-top (960×420) :  3D EE trajectory + orientation frames
-  Right-bot (960×300) :  EE orientation curves + gripper state
+Layout (auto-scaled):
+  Left  : camera grid (auto: 2×2 for 4 cams, 3+2 for 5 cams, etc.)
+  Right-top : 3D EE trajectory + orientation frames
+  Right-bot : EE orientation curves + gripper state
 
 Usage:
     python visualize_episode.py dataset/test/episode_004
@@ -12,6 +12,7 @@ Usage:
 """
 
 import argparse
+import math
 import sys
 from pathlib import Path
 
@@ -24,27 +25,28 @@ from mpl_toolkits.mplot3d import proj3d
 import numpy as np
 from scipy.spatial.transform import Rotation
 
-CAM_NAMES = ["left_cam0", "left_cam1", "right_cam0", "right_cam1"]
-
 # ---- layout constants (pixels) ----
-CAM_W, CAM_H = 480, 360          # per camera
 DPI = 100
-VIEW3D_W, VIEW3D_H = 960, 420
-STRIP_W, STRIP_H = 960, 300
+RIGHT_W = 960
+VIEW3D_H = 420
+STRIP_H = 300
+RIGHT_H = VIEW3D_H + STRIP_H   # 720
 
-VIDEO_W = CAM_W * 2 + VIEW3D_W   # 1920
-VIDEO_H = CAM_H * 2              # 720
+TRAIL_LEN = 100
+AXIS_LEN = 0.04
 
-TRAIL_LEN = 100                    # frames of trail in 3D view
-AXIS_LEN = 0.04                   # orientation arrow length (metres)
-
-LEFT_BGR  = (60, 60, 230)         # warm red
-RIGHT_BGR = (230, 140, 40)        # cool blue
+LEFT_BGR  = (60, 60, 230)
+RIGHT_BGR = (230, 140, 40)
 
 CAM_LABELS = {
     "left_cam0": "CL Fisheye",  "left_cam1": "CR Fisheye",
     "right_cam0": "BL Fisheye", "right_cam1": "BR Fisheye",
+    "top_cam": "Top Cam (D435i)",
 }
+
+
+def _cam_label(name: str) -> str:
+    return CAM_LABELS.get(name, name)
 
 
 # =====================================================================
@@ -68,14 +70,52 @@ def decode_jpeg(buf, w, h):
     return img
 
 
+def compute_cam_grid_layout(n_cams: int, panel_w: int, panel_h: int,
+                             src_ratio: float = 4.0 / 3.0):
+    """Compute grid dimensions and per-cell size, preserving source aspect ratio."""
+    if n_cams <= 4:
+        ncols, nrows = 2, 2
+    elif n_cams <= 6:
+        ncols, nrows = 3, 2
+    elif n_cams <= 9:
+        ncols, nrows = 3, 3
+    else:
+        ncols = math.ceil(math.sqrt(n_cams))
+        nrows = math.ceil(n_cams / ncols)
+    max_cw = panel_w // ncols
+    max_ch = panel_h // nrows
+    if max_cw / max_ch > src_ratio:
+        cell_h = max_ch
+        cell_w = int(cell_h * src_ratio)
+    else:
+        cell_w = max_cw
+        cell_h = int(cell_w / src_ratio)
+    return ncols, nrows, cell_w, cell_h
+
+
+def build_cam_grid(cam_frames, cam_names, ncols, nrows, cell_w, cell_h):
+    """Decode JPEG buffers and assemble into a grid image."""
+    blank = np.zeros((cell_h, cell_w, 3), dtype=np.uint8)
+    imgs = []
+    for j, name in enumerate(cam_names):
+        img = decode_jpeg(cam_frames[name], cell_w, cell_h)
+        cv2.putText(img, _cam_label(name), (8, 24),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.50, (0, 200, 255), 1, cv2.LINE_AA)
+        imgs.append(img)
+    while len(imgs) < ncols * nrows:
+        imgs.append(blank)
+    rows = []
+    for r in range(nrows):
+        rows.append(np.hstack(imgs[r * ncols:(r + 1) * ncols]))
+    return np.vstack(rows)
+
+
 # =====================================================================
 # pre-render: 3D workspace
 # =====================================================================
 
 def render_3d_base(left_pos, right_pos):
-    """Render static 3D trajectory background; return (image, project_fn, fig)."""
-
-    fig = plt.figure(figsize=(VIEW3D_W / DPI, VIEW3D_H / DPI), dpi=DPI)
+    fig = plt.figure(figsize=(RIGHT_W / DPI, VIEW3D_H / DPI), dpi=DPI)
     ax = fig.add_subplot(111, projection="3d")
     fig.subplots_adjust(left=0.0, right=1.0, top=0.96, bottom=0.0)
 
@@ -90,7 +130,6 @@ def render_3d_base(left_pos, right_pos):
     ax.set_zlabel("Z (m)", fontsize=7, labelpad=1)
     ax.set_title("Left (red)  /  Right (blue)  EE Workspace", fontsize=9, fontweight="bold")
     ax.tick_params(labelsize=6, pad=0)
-
     ax.view_init(elev=28, azim=-55)
 
     all_pos = np.vstack([left_pos, right_pos])
@@ -106,7 +145,6 @@ def render_3d_base(left_pos, right_pos):
     img_h, img_w = base.shape[:2]
     fig_h = fig.canvas.get_width_height()[1]
 
-    # capture projection transform (keep fig alive so ax.transData works)
     _proj = ax.get_proj()
 
     def _raw_project(pt):
@@ -114,11 +152,10 @@ def render_3d_base(left_pos, right_pos):
         px, py = ax.transData.transform((x2, y2))
         return px, fig_h - py
 
-    # handle possible image resize
-    need_resize = (img_w, img_h) != (VIEW3D_W, VIEW3D_H)
+    need_resize = (img_w, img_h) != (RIGHT_W, VIEW3D_H)
     if need_resize:
-        sx, sy = VIEW3D_W / img_w, VIEW3D_H / img_h
-        base = cv2.resize(base, (VIEW3D_W, VIEW3D_H))
+        sx, sy = RIGHT_W / img_w, VIEW3D_H / img_h
+        base = cv2.resize(base, (RIGHT_W, VIEW3D_H))
 
     def project(pt):
         px, py = _raw_project(pt)
@@ -126,7 +163,7 @@ def render_3d_base(left_pos, right_pos):
             px, py = px * sx, py * sy
         return int(round(px)), int(round(py))
 
-    return base, project, fig          # return fig to keep reference alive
+    return base, project, fig
 
 
 # =====================================================================
@@ -134,15 +171,12 @@ def render_3d_base(left_pos, right_pos):
 # =====================================================================
 
 def render_strip_base(ts_sec, left_euler, right_euler, gripper_l, gripper_r):
-    """Render orientation + gripper strip. Returns (image, axes_px_list, t_min, t_max)."""
-
     fig, axes = plt.subplots(
-        2, 1, figsize=(STRIP_W / DPI, STRIP_H / DPI), dpi=DPI)
+        2, 1, figsize=(RIGHT_W / DPI, STRIP_H / DPI), dpi=DPI)
     fig.subplots_adjust(left=0.07, right=0.97, top=0.92, bottom=0.13, hspace=0.45)
 
     c3 = ["#e74c3c", "#2ecc71", "#3498db"]
 
-    # ---- orientation ----
     ax = axes[0]
     for k, (lbl, c) in enumerate(zip(["roll", "pitch", "yaw"], c3)):
         ax.plot(ts_sec, left_euler[:, k],  color=c, lw=0.7, label=f"L_{lbl}")
@@ -152,8 +186,8 @@ def render_strip_base(ts_sec, left_euler, right_euler, gripper_l, gripper_r):
     ax.legend(ncol=6, fontsize=5, loc="upper right", framealpha=0.6)
     ax.tick_params(labelsize=6)
     ax.grid(True, alpha=0.2)
+    ax.set_xlim(ts_sec[0], ts_sec[-1])
 
-    # ---- gripper ----
     ax = axes[1]
     ax.plot(ts_sec, gripper_l,  color="#e74c3c", lw=1.0, label="Left")
     ax.plot(ts_sec, gripper_r,  color="#3498db", lw=1.0, label="Right")
@@ -162,6 +196,7 @@ def render_strip_base(ts_sec, left_euler, right_euler, gripper_l, gripper_r):
     ax.set_title("Gripper State", fontsize=8, fontweight="bold")
     ax.legend(fontsize=6, loc="upper right")
     ax.set_ylim(0.0, 1.0)
+    ax.set_xlim(ts_sec[0], ts_sec[-1])
     ax.tick_params(labelsize=6)
     ax.grid(True, alpha=0.2)
 
@@ -181,9 +216,9 @@ def render_strip_base(ts_sec, left_euler, right_euler, gripper_l, gripper_r):
     t_min, t_max = float(ts_sec[0]), float(ts_sec[-1])
     plt.close(fig)
 
-    if (img_w, img_h) != (STRIP_W, STRIP_H):
-        sx, sy = STRIP_W / img_w, STRIP_H / img_h
-        base = cv2.resize(base, (STRIP_W, STRIP_H))
+    if (img_w, img_h) != (RIGHT_W, STRIP_H):
+        sx, sy = RIGHT_W / img_w, STRIP_H / img_h
+        base = cv2.resize(base, (RIGHT_W, STRIP_H))
         axes_px = [(int(x0*sx), int(x1*sx), int(y0*sy), int(y1*sy))
                     for (x0, x1, y0, y1) in axes_px]
 
@@ -196,26 +231,21 @@ def render_strip_base(ts_sec, left_euler, right_euler, gripper_l, gripper_r):
 
 def draw_3d_overlay(base, project, i, left_pos, right_pos, left_rot, right_rot):
     frame = base.copy()
-
     trail_start = max(0, i - TRAIL_LEN)
 
     for pos_arr, rot_arr, color, label in [
         (left_pos,  left_rot,  LEFT_BGR,  "Left"),
         (right_pos, right_rot, RIGHT_BGR, "Right"),
     ]:
-        # trail polyline
         pts = np.array([project(pos_arr[j]) for j in range(trail_start, i + 1)], np.int32)
         if len(pts) >= 2:
             cv2.polylines(frame, [pts], False, color, 2, cv2.LINE_AA)
 
         c = project(pos_arr[i])
-
-        # orientation axes (x=red, y=green, z=blue)
         for col, ac in enumerate([(0, 0, 255), (0, 200, 0), (255, 80, 0)]):
             end = pos_arr[i] + rot_arr[i][:, col] * AXIS_LEN
             cv2.arrowedLine(frame, c, project(end), ac, 2, cv2.LINE_AA, tipLength=0.25)
 
-        # dot + label
         cv2.circle(frame, c, 6, color, -1, cv2.LINE_AA)
         cv2.circle(frame, c, 6, (255, 255, 255), 1, cv2.LINE_AA)
         cv2.putText(frame, label, (c[0] + 10, c[1] - 8),
@@ -254,6 +284,19 @@ def main():
         grip_l  = f["left_arm/gripper"][:]
         grip_r  = f["right_arm/gripper"][:]
 
+        cam_names = sorted(f["camera"].keys())
+
+    print(f"Cameras detected: {cam_names}")
+
+    # compute left-panel layout
+    ncols, nrows, cam_cw, cam_ch = compute_cam_grid_layout(
+        len(cam_names), panel_w=RIGHT_W, panel_h=RIGHT_H)
+    left_w = cam_cw * ncols
+    left_h = cam_ch * nrows
+
+    video_w = left_w + RIGHT_W
+    video_h = max(left_h, RIGHT_H)
+
     l_pos, r_pos   = l_tcp[:, :3], r_tcp[:, :3]
     l_rot, r_rot   = quat_wxyz_to_rotmat(l_tcp[:, 3:]), quat_wxyz_to_rotmat(r_tcp[:, 3:])
     l_euler        = quat_wxyz_to_euler(l_tcp[:, 3:])
@@ -270,22 +313,20 @@ def main():
     print("Loading camera frames ...")
     with h5py.File(hdf5, "r") as f:
         cam_data = {name: [f[f"camera/{name}"][i] for i in range(n)]
-                    for name in CAM_NAMES}
+                    for name in cam_names}
 
-    # Build a real-time 30fps video timeline: one video frame per 1/fps second,
-    # mapping each to the nearest HDF5 data frame by timestamp.
     duration = ts_sec[-1]
     n_video = int(np.ceil(duration * args.fps))
     video_t = np.linspace(0, duration, n_video, endpoint=False)
-    # For each video frame, find the nearest (<=) data index
     data_idx = np.searchsorted(ts_sec, video_t, side="right") - 1
     data_idx = np.clip(data_idx, 0, n - 1)
 
     actual_hz = (n - 1) / duration if duration > 0 else 0
     writer = cv2.VideoWriter(
-        out_path, cv2.VideoWriter_fourcc(*"mp4v"), args.fps, (VIDEO_W, VIDEO_H))
+        out_path, cv2.VideoWriter_fourcc(*"mp4v"), args.fps, (video_w, video_h))
     print(f"Generating video: {n_video} video frames ({args.fps}fps), "
-          f"{duration:.1f}s real-time, data {n} frames ({actual_hz:.1f}Hz) → {out_path}")
+          f"{duration:.1f}s real-time, data {n} frames ({actual_hz:.1f}Hz), "
+          f"{len(cam_names)} cameras, {video_w}x{video_h} → {out_path}")
 
     prev_di = -1
     cached_cam_grid = None
@@ -295,29 +336,39 @@ def main():
         di = data_idx[vi]
         t_now = video_t[vi]
 
-        # Only re-decode cameras & 3D overlay when the data index advances
         if di != prev_di:
-            imgs = [decode_jpeg(cam_data[nm][di], CAM_W, CAM_H) for nm in CAM_NAMES]
-            for j, nm in enumerate(CAM_NAMES):
-                cv2.putText(imgs[j], CAM_LABELS[nm], (8, 24),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (0, 200, 255), 1, cv2.LINE_AA)
-            cached_cam_grid = np.vstack([np.hstack(imgs[:2]), np.hstack(imgs[2:])])
+            cam_frame_dict = {name: cam_data[name][di] for name in cam_names}
+            cached_cam_grid = build_cam_grid(
+                cam_frame_dict, cam_names, ncols, nrows, cam_cw, cam_ch)
             cached_view3d = draw_3d_overlay(base_3d, project, di,
                                             l_pos, r_pos, l_rot, r_rot)
             prev_di = di
 
-        # ---- strip with cursor (always updated for smooth sweep) ----
+        # strip with cursor
         strip = strip_base.copy()
         frac = (t_now - t_min) / t_range
         for (x0, x1, y0, y1) in strip_axes:
             xp = int(x0 + frac * (x1 - x0))
             cv2.line(strip, (xp, y0), (xp, y1), (0, 0, 255), 2)
 
-        # ---- composite ----
         right = np.vstack([cached_view3d, strip])
-        frame = np.hstack([cached_cam_grid, right])
 
-        cv2.putText(frame, f"data #{di}/{n}  t={t_now:.2f}s", (10, VIDEO_H - 10),
+        # pad left/right panels to the same height
+        if cached_cam_grid.shape[0] < video_h:
+            pad = np.zeros((video_h - cached_cam_grid.shape[0], left_w, 3), dtype=np.uint8)
+            left_panel = np.vstack([cached_cam_grid, pad])
+        else:
+            left_panel = cached_cam_grid[:video_h]
+
+        if right.shape[0] < video_h:
+            pad = np.zeros((video_h - right.shape[0], RIGHT_W, 3), dtype=np.uint8)
+            right = np.vstack([right, pad])
+        else:
+            right = right[:video_h]
+
+        frame = np.hstack([left_panel, right])
+
+        cv2.putText(frame, f"data #{di}/{n}  t={t_now:.2f}s", (10, video_h - 10),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 255), 1, cv2.LINE_AA)
         writer.write(frame)
 

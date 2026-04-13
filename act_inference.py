@@ -93,6 +93,9 @@ ACT_TO_LIVE_CAM = {
     "right_rightcam": "right_cam1",
 }
 
+# Cameras served by local RealSense (not via Cyber2PC)
+REALSENSE_CAMS = {"top_cam"}
+
 HOME_PLAN = "ReturnNewHome"
 HOME_TIMEOUT = 120.0
 
@@ -243,15 +246,20 @@ def load_act_policy(ckpt_dir: str, ckpt: str | None = None) -> tuple[ACTPolicy, 
 # Observation helpers
 # ===================================================================
 
-def build_image_tensor(observer, camera_names: list[str]) -> torch.Tensor:
+def build_image_tensor(observer, camera_names: list[str], rs_cam=None) -> torch.Tensor:
     """Read live camera frames -> (1, N_cam, 3, H, W) float CUDA tensor."""
     cam_buf = observer.get_cam()
     imgs = []
     for act_name in camera_names:
-        live_name = ACT_TO_LIVE_CAM[act_name]
-        img = cam_buf.get(live_name)
-        if img is None:
-            raise RuntimeError(f"Camera {live_name} not available yet (waiting for stream)")
+        if act_name in REALSENSE_CAMS:
+            img = rs_cam.get_frame() if rs_cam is not None else None
+            if img is None:
+                raise RuntimeError(f"RealSense camera {act_name} not available yet")
+        else:
+            live_name = ACT_TO_LIVE_CAM[act_name]
+            img = cam_buf.get(live_name)
+            if img is None:
+                raise RuntimeError(f"Camera {live_name} not available yet (waiting for stream)")
         imgs.append(img)  # (H, W, 3) BGR uint8
 
     stacked = np.stack(imgs, axis=0)                        # (N, H, W, 3)
@@ -284,6 +292,16 @@ def build_state_tensors(
 
     left_qpos = np.append(left_q, left_g).astype(np.float32)    # (8,)
     right_qpos = np.append(right_q, right_g).astype(np.float32)  # (8,)
+
+    if stats.get("gripper_binary"):
+        gmin = stats["gripper_raw_min"]
+        gmax = stats["gripper_raw_max"]
+        lr = max(float(gmax[0] - gmin[0]), 1e-8)
+        rr = max(float(gmax[1] - gmin[1]), 1e-8)
+        left_qpos[-1] = np.clip((left_qpos[-1] - gmin[0]) / lr, 0.0, 1.0)
+        right_qpos[-1] = np.clip((right_qpos[-1] - gmin[1]) / rr, 0.0, 1.0)
+        left_qpos[-1] = 1.0 if left_qpos[-1] > 0.5 else 0.0
+        right_qpos[-1] = 1.0 if right_qpos[-1] > 0.5 else 0.0
 
     left_states = left_qpos
     right_states = right_qpos
@@ -423,7 +441,8 @@ def temporal_agg_step(
 # ===================================================================
 
 def inference_loop(args, policy, stats, train_args, observer,
-                   left_robot, right_robot, left_g, right_g):
+                   left_robot, right_robot, left_g, right_g,
+                   rs_cam=None):
     camera_names = train_args["camera_names"]
     chunk_size = train_args["chunk_size"]
     action_dim = policy.model.action_dim if hasattr(policy.model, "action_dim") else ACTION_DIM_HALF * 2
@@ -441,9 +460,14 @@ def inference_loop(args, policy, stats, train_args, observer,
     print(f"\nInference: {max_steps} steps, {args.freq} Hz, temporal_agg={temporal_agg}")
     print("Waiting for camera stream ...")
 
+    orin_cams = [n for n in camera_names if n not in REALSENSE_CAMS]
+    rs_cams = [n for n in camera_names if n in REALSENSE_CAMS]
+
     while True:
         cam_buf = observer.get_cam()
-        if all(cam_buf.get(ACT_TO_LIVE_CAM[n]) is not None for n in camera_names):
+        orin_ok = all(cam_buf.get(ACT_TO_LIVE_CAM[n]) is not None for n in orin_cams)
+        rs_ok = all(rs_cam is not None and rs_cam.get_frame() is not None for _ in rs_cams) if rs_cams else True
+        if orin_ok and rs_ok:
             break
         time.sleep(0.1)
     print("Camera stream ready.")
@@ -461,7 +485,7 @@ def inference_loop(args, policy, stats, train_args, observer,
             for t in range(max_steps):
                 t0 = time.time()
 
-                image_tensor = build_image_tensor(observer, camera_names)
+                image_tensor = build_image_tensor(observer, camera_names, rs_cam=rs_cam)
 
                 if dry_run:
                     per = JOINTS_PER_ARM
@@ -582,11 +606,20 @@ def main():
     observer.start()
     print("Cyber2PCObserver started (camera + gripper stream).")
 
+    # 2b. Start RealSense if any camera_name requires it
+    rs_cam = None
+    camera_names = train_args["camera_names"]
+    if any(n in REALSENSE_CAMS for n in camera_names):
+        from realsense_cam import RealsenseCam
+        rs_cam = RealsenseCam(name="top_cam", width=640, height=480, fps=30)
+        rs_cam.start()
+
     if args.dry_run:
         print("\n=== DRY RUN: no hardware connection ===\n")
-        # Wait for camera frames then run loop printing actions
         inference_loop(args, policy, stats, train_args, observer,
-                       None, None, None, None)
+                       None, None, None, None, rs_cam=rs_cam)
+        if rs_cam:
+            rs_cam.stop()
         return
 
     # 3. Init hardware
@@ -599,7 +632,8 @@ def main():
     # 5. Run
     try:
         inference_loop(args, policy, stats, train_args, observer,
-                       left_robot, right_robot, left_g, right_g)
+                       left_robot, right_robot, left_g, right_g,
+                       rs_cam=rs_cam)
     finally:
         for label, robot in [("left", left_robot), ("right", right_robot)]:
             try:
@@ -612,6 +646,8 @@ def main():
                     g.stop()
                 except Exception as e:
                     print(f"Warning: failed to stop {label} gripper: {e}")
+        if rs_cam:
+            rs_cam.stop()
         observer.stop()
 
 

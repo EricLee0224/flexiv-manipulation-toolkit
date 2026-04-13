@@ -15,13 +15,14 @@ Stage 3 诊断：验证对齐后的 episode.hdf5 质量。
 
 import argparse
 import hashlib
+import math
 import sys
 
 import cv2
 import h5py
 import numpy as np
 
-CAM_NAMES = ["left_cam0", "left_cam1", "right_cam0", "right_cam1"]
+CELL_W, CELL_H = 640, 480
 
 
 def main():
@@ -78,15 +79,15 @@ def main():
                     else:
                         print()
 
-        # --- cameras ---
+        # --- auto-detect cameras ---
         print(f"\n--- Cameras ---")
-
         cam_group = f["camera"]
+        cam_names = sorted(cam_group.keys())
+        print(f"  detected: {cam_names}")
 
-        for name in CAM_NAMES:
+        for name in cam_names:
             ds = cam_group[name]
 
-            # decode check
             sample_idx = [0, n // 4, n // 2, 3 * n // 4, n - 1]
             sample_idx = sorted(set(i for i in sample_idx if 0 <= i < n))
             decode_ok = 0
@@ -102,7 +103,6 @@ def main():
             avg_kb = np.mean(sizes) / 1024 if sizes else 0
             print(f"  [{name}] decode {decode_ok}/{len(sample_idx)}, avg JPEG {avg_kb:.0f} KB", end="")
 
-            # uniqueness
             spread = np.linspace(0, n - 1, min(30, n), dtype=int)
             hashes = []
             for i in spread:
@@ -119,7 +119,6 @@ def main():
             else:
                 print(" ✓")
 
-            # consecutive duplicate analysis
             if n > 10:
                 check_n = min(n, 300)
                 prev_h = None
@@ -146,40 +145,49 @@ def main():
                 out_path = args.output
             else:
                 out_path = os.path.join(os.path.dirname(args.hdf5), "diag_episode.mp4")
-            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
-            writer = cv2.VideoWriter(out_path, fourcc, 30, (1280, 960))
 
-            # pre-read all camera data
+            ncols = 2 if len(cam_names) <= 4 else 3
+            nrows = math.ceil(len(cam_names) / ncols)
+            grid_w, grid_h = CELL_W * ncols, CELL_H * nrows
+
+            fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+            writer = cv2.VideoWriter(out_path, fourcc, 30, (grid_w, grid_h))
+
             cam_data = {}
-            for cam_name in CAM_NAMES:
+            for cam_name in cam_names:
                 print(f"  loading {cam_name} ...")
                 cam_data[cam_name] = [cam_group[cam_name][i] for i in range(n)]
 
             def decode(buf):
                 if len(buf) == 0:
-                    return np.zeros((480, 640, 3), dtype=np.uint8)
+                    return np.zeros((CELL_H, CELL_W, 3), dtype=np.uint8)
                 img = cv2.imdecode(buf, cv2.IMREAD_COLOR)
-                return img if img is not None else np.zeros((480, 640, 3), dtype=np.uint8)
+                if img is None:
+                    return np.zeros((CELL_H, CELL_W, 3), dtype=np.uint8)
+                if (img.shape[1], img.shape[0]) != (CELL_W, CELL_H):
+                    img = cv2.resize(img, (CELL_W, CELL_H))
+                return img
 
+            blank = np.zeros((CELL_H, CELL_W, 3), dtype=np.uint8)
             for i in range(n):
-                imgs = [decode(cam_data[name][i]) for name in CAM_NAMES]
-
-                for j, img in enumerate(imgs):
-                    h, w = img.shape[:2]
-                    if (w, h) != (640, 480):
-                        imgs[j] = cv2.resize(img, (640, 480))
-
-                # add frame number + timestamp overlay
                 dt_ms = (ts[i] - ts[0]) / 1e6
-                for j, img in enumerate(imgs):
+                imgs = []
+                for j, cam_name in enumerate(cam_names):
+                    img = decode(cam_data[cam_name][i])
                     cv2.putText(img, f"#{i} {dt_ms:.0f}ms", (10, 30),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
-                    cv2.putText(img, CAM_NAMES[j], (10, 60),
+                    cv2.putText(img, cam_name, (10, 60),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 200, 255), 2)
+                    imgs.append(img)
 
-                top = np.hstack((imgs[0], imgs[1]))
-                bottom = np.hstack((imgs[2], imgs[3]))
-                grid = np.vstack((top, bottom))
+                # pad to full grid
+                while len(imgs) < ncols * nrows:
+                    imgs.append(blank)
+
+                rows = []
+                for r in range(nrows):
+                    rows.append(np.hstack(imgs[r * ncols:(r + 1) * ncols]))
+                grid = np.vstack(rows)
                 writer.write(grid)
 
                 if i % 100 == 0:

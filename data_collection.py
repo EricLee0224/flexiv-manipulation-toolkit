@@ -4,6 +4,7 @@ import numpy as np
 
 from robot.flexiv_arm import FlexivArm
 from ee.cyber2pc_observer import Cyber2PCObserver
+from realsense_cam import RealsenseCam
 from recorder import ArmRecorder
 from dataset_utils import get_next_episode_dir
 
@@ -111,6 +112,13 @@ def main():
     observer.start()
 
     # --------------------
+    # RealSense top camera (640x480 @ 30 Hz, USB-connected to PC)
+    # --------------------
+
+    top_cam = RealsenseCam(name="top_cam", width=640, height=480, fps=30)
+    top_cam.start()
+
+    # --------------------
     # Arm recorder (arm-only, high rate)
     # --------------------
 
@@ -148,6 +156,7 @@ def main():
             elif cmd == "r":
 
                 observer.start_recording()
+                top_cam.start_recording()
                 arm_recorder.start()
                 print("Recording started (all sources independent).")
 
@@ -182,6 +191,7 @@ def main():
 
                 print("Flushing camera decode pipeline ...")
                 observer.stop_recording()
+                top_cam.stop_recording()
                 arm_recorder.stop()
                 print("Flush complete.")
 
@@ -202,7 +212,11 @@ def main():
                 print(f"Saving to {episode_dir} ...")
 
                 save_arm_pkl(arm_recorder.get_data(), episode_dir / "arm.pkl")
-                save_cam_pkl(observer.get_recorded_cam(), episode_dir)
+
+                cam_data = observer.get_recorded_cam()
+                cam_data["top_cam"] = top_cam.get_recorded_frames()
+                save_cam_pkl(cam_data, episode_dir)
+
                 save_gripper_pkl(observer.get_recorded_gripper(), episode_dir / "gripper.pkl")
 
                 print(f"Episode saved → {episode_dir}")
@@ -220,6 +234,7 @@ def main():
         arm_left.disable_teach()
         arm_right.disable_teach()
 
+        top_cam.stop()
         observer.stop()
 
         print("Program finished.")

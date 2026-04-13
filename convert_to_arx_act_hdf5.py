@@ -80,8 +80,12 @@ def _write_one(
         obs.create_dataset("robot_base", data=robot_base, compression="gzip", compression_opts=1)
 
         img_grp = obs.create_group("images")
+        cam_grp = src["camera"]
         for arx_name, flex_name in cam_sources.items():
-            ds_src = src[f"camera/{flex_name}"]
+            if flex_name not in cam_grp:
+                print(f"    Warning: camera/{flex_name} not in {flexiv_h5.name}, skipping {arx_name}")
+                continue
+            ds_src = cam_grp[flex_name]
             d = img_grp.create_dataset(arx_name, (n,), dtype=vlen_u8)
             for i in range(n):
                 raw = ds_src[i]
@@ -126,6 +130,11 @@ def main():
         help="写入四路相机 observations/images/{left_cam0,left_cam1,right_cam0,right_cam1}（与 Flexiv 键名一致）；"
         "训练时: --camera_names left_cam0 left_cam1 right_cam0 right_cam1",
     )
+    p.add_argument(
+        "--top_cam",
+        action="store_true",
+        help="包含 RealSense top_cam（若 episode.hdf5 里有 camera/top_cam）",
+    )
     p.add_argument("--overwrite_out_dir", action="store_true", help="若存在 out_dir 则先删除再写入（慎用）")
     args = p.parse_args()
 
@@ -142,6 +151,9 @@ def main():
             "left_wrist": args.left_wrist_cam,
             "right_wrist": args.right_wrist_cam,
         }
+
+    if args.top_cam:
+        cam_sources["top_cam"] = "top_cam"
 
     if args.flexiv_episode:
         ep_dir = Path(args.flexiv_episode)
