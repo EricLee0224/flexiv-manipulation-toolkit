@@ -22,6 +22,9 @@ Usage:
     # custom frequency / chunk
     python act_inference.py --ckpt_dir /path/to/run_dir --freq 30
 
+    # blocking chunk: run one policy forward, send all chunk_size steps, then re-infer
+    python act_inference.py --ckpt_dir /path/to/run_dir --blocking-chunk
+
     # skip gripper
     python act_inference.py --ckpt_dir /path/to/run_dir --no-gripper
 """
@@ -302,6 +305,13 @@ def build_state_tensors(
         right_qpos[-1] = np.clip((right_qpos[-1] - gmin[1]) / rr, 0.0, 1.0)
         left_qpos[-1] = 1.0 if left_qpos[-1] > 0.5 else 0.0
         right_qpos[-1] = 1.0 if right_qpos[-1] > 0.5 else 0.0
+    elif stats.get("gripper_remap_01"):
+        gmin = stats["gripper_raw_min"]
+        gmax = stats["gripper_raw_max"]
+        lr = max(float(gmax[0] - gmin[0]), 1e-8)
+        rr = max(float(gmax[1] - gmin[1]), 1e-8)
+        left_qpos[-1] = np.clip((left_qpos[-1] - gmin[0]) / lr, 0.0, 1.0)
+        right_qpos[-1] = np.clip((right_qpos[-1] - gmin[1]) / rr, 0.0, 1.0)
 
     left_states = left_qpos
     right_states = right_qpos
@@ -336,7 +346,17 @@ def build_state_tensors(
 def postprocess_action(raw: np.ndarray, stats: dict) -> np.ndarray:
     """Denormalize the first 16 dims (joint action) from the model output."""
     action = raw * stats["action_std"] + stats["action_mean"]
-    return action[:ACTION_DIM_HALF]  # (16,) — discard the doubled zero half
+    action = action[:ACTION_DIM_HALF]  # (16,) — discard the doubled zero half
+    if stats.get("gripper_remap_01") and not stats.get("gripper_binary"):
+        gmin = stats["gripper_raw_min"]
+        gmax = stats["gripper_raw_max"]
+        lr = max(float(gmax[0] - gmin[0]), 1e-8)
+        rr = max(float(gmax[1] - gmin[1]), 1e-8)
+        uL = float(np.clip(action[LEFT_GRIPPER_IDX], 0.0, 1.0))
+        uR = float(np.clip(action[RIGHT_GRIPPER_IDX], 0.0, 1.0))
+        action[LEFT_GRIPPER_IDX] = uL * lr + float(gmin[0])
+        action[RIGHT_GRIPPER_IDX] = uR * rr + float(gmin[1])
+    return action
 
 
 # ===================================================================
@@ -448,7 +468,8 @@ def inference_loop(args, policy, stats, train_args, observer,
     action_dim = policy.model.action_dim if hasattr(policy.model, "action_dim") else ACTION_DIM_HALF * 2
     use_qvel = train_args["use_qvel"]
     use_effort = train_args["use_effort"]
-    temporal_agg = train_args.get("temporal_agg", True)
+    blocking_chunk = bool(getattr(args, "blocking_chunk", False))
+    temporal_agg = train_args.get("temporal_agg", True) and not blocking_chunk
 
     max_steps = args.max_steps
     dt = 1.0 / args.freq
@@ -456,8 +477,11 @@ def inference_loop(args, policy, stats, train_args, observer,
     if temporal_agg:
         buf_len = max_steps + chunk_size
         all_time_actions = np.zeros((max_steps, buf_len, action_dim), dtype=np.float32)
+    else:
+        all_time_actions = None
 
-    print(f"\nInference: {max_steps} steps, {args.freq} Hz, temporal_agg={temporal_agg}")
+    mode = "blocking_chunk" if blocking_chunk else ("temporal_agg" if temporal_agg else "single_step_head")
+    print(f"\nInference: {max_steps} steps, {args.freq} Hz, mode={mode}")
     print("Waiting for camera stream ...")
 
     orin_cams = [n for n in camera_names if n not in REALSENSE_CAMS]
@@ -480,79 +504,139 @@ def inference_loop(args, policy, stats, train_args, observer,
 
     print("Running policy ... (Ctrl+C to stop)\n")
 
+    def _policy_inputs():
+        image_tensor = build_image_tensor(observer, camera_names, rs_cam=rs_cam)
+        if dry_run:
+            per = JOINTS_PER_ARM
+            dummy = np.zeros(per, dtype=np.float32)
+            combined = np.concatenate([dummy, dummy])
+            left_s = (combined - stats["left_states_mean"]) / stats["left_states_std"]
+            right_s = (combined - stats["right_states_mean"]) / stats["right_states_std"]
+            left_s = torch.from_numpy(left_s).float().cuda().unsqueeze(0)
+            right_s = torch.from_numpy(right_s).float().cuda().unsqueeze(0)
+        else:
+            left_s, right_s = build_state_tensors(
+                left_robot, right_robot, observer,
+                stats, use_qvel, use_effort,
+            )
+        return image_tensor, left_s, right_s
+
     try:
         with torch.inference_mode():
-            for t in range(max_steps):
-                t0 = time.time()
+            if blocking_chunk:
+                step = 0
+                chunk_idx = 0
+                while step < max_steps:
+                    image_tensor, left_s, right_s = _policy_inputs()
+                    t0_chunk = time.time()
+                    all_actions, _ = policy(image_tensor, None, left_s, right_s)
+                    chunk_raw = all_actions[0].cpu().numpy()
 
-                image_tensor = build_image_tensor(observer, camera_names, rs_cam=rs_cam)
-
-                if dry_run:
-                    per = JOINTS_PER_ARM
-                    dummy = np.zeros(per, dtype=np.float32)
-                    combined = np.concatenate([dummy, dummy])  # left(8) + right(8) = 16
-                    left_s = (combined - stats["left_states_mean"]) / stats["left_states_std"]
-                    right_s = (combined - stats["right_states_mean"]) / stats["right_states_std"]
-                    left_s = torch.from_numpy(left_s).float().cuda().unsqueeze(0)
-                    right_s = torch.from_numpy(right_s).float().cuda().unsqueeze(0)
-                else:
-                    left_s, right_s = build_state_tensors(
-                        left_robot, right_robot, observer,
-                        stats, use_qvel, use_effort,
-                    )
-
-                all_actions, _ = policy(image_tensor, None, left_s, right_s)
-                # all_actions: (1, chunk_size, action_dim)
-
-                if t % 4 == 0:
-                    chunk_raw = all_actions[0].cpu().numpy()  # (chunk_size, action_dim)
                     chunk_denorm = chunk_raw * stats["action_std"] + stats["action_mean"]
                     lg_chunk = chunk_denorm[:, LEFT_GRIPPER_IDX]
                     rg_chunk = chunk_denorm[:, RIGHT_GRIPPER_IDX]
                     np.set_printoptions(precision=4, linewidth=200, suppress=True)
-                    print(f"  t={t:5d}  chunk L_grip={lg_chunk}")
-                    print(f"         chunk R_grip={rg_chunk}")
+                    print(f"  chunk={chunk_idx:4d}  steps [{step}:{step + chunk_size})  "
+                          f"L_grip={lg_chunk}  R_grip={rg_chunk}")
 
-                if temporal_agg:
-                    raw = temporal_agg_step(
-                        all_time_actions, t,
-                        all_actions.cpu().numpy()[0],
-                        chunk_size,
-                    )
-                else:
-                    raw = all_actions[0, 0].cpu().numpy()
+                    for k in range(chunk_size):
+                        if step >= max_steps:
+                            break
+                        t0 = time.time()
+                        raw = chunk_raw[k]
+                        action_16 = postprocess_action(raw, stats)
 
-                action_16 = postprocess_action(raw, stats)
+                        if dry_run and (step % 30 == 0 or k == 0):
+                            print(f"  step={step:4d} k={k}  L_q={action_16[:7].round(3)}  "
+                                  f"L_g={action_16[7]:.3f}  "
+                                  f"R_q={action_16[8:15].round(3)}  "
+                                  f"R_g={action_16[15]:.3f}")
+                        elif not dry_run:
+                            send_action(left_robot, right_robot, left_g, right_g,
+                                        action_16, args.max_vel, args.max_acc)
 
-                if dry_run:
-                    if t % 30 == 0:
-                        print(f"  t={t:4d}  L_q={action_16[:7].round(3)}  "
-                              f"L_g={action_16[7]:.3f}  "
-                              f"R_q={action_16[8:15].round(3)}  "
-                              f"R_g={action_16[15]:.3f}")
-                else:
-                    send_action(left_robot, right_robot, left_g, right_g,
-                                action_16, args.max_vel, args.max_acc)
+                        if step > 0 and step % 4 == 0:
+                            lg_cmd = action_16[LEFT_GRIPPER_IDX]
+                            rg_cmd = action_16[RIGHT_GRIPPER_IDX]
+                            if not dry_run:
+                                gbuf = observer.get_gripper()
+                                lg_obs = float(gbuf["left"][-1]["pos"]) if gbuf["left"] else float("nan")
+                                rg_obs = float(gbuf["right"][-1]["pos"]) if gbuf["right"] else float("nan")
+                                print(f"  step={step:5d}  gripper cmd L={lg_cmd:.4f} R={rg_cmd:.4f}  "
+                                      f"obs L={lg_obs:.4f} R={rg_obs:.4f}")
+                            else:
+                                print(f"  step={step:5d}  gripper cmd L={lg_cmd:.4f} R={rg_cmd:.4f}")
 
-                elapsed = time.time() - t0
-                sleep_time = dt - elapsed
-                if sleep_time > 0:
-                    time.sleep(sleep_time)
+                        elapsed = time.time() - t0
+                        sleep_time = dt - elapsed
+                        if sleep_time > 0:
+                            time.sleep(sleep_time)
 
-                if t > 0 and t % 4 == 0:
-                    lg_cmd = action_16[LEFT_GRIPPER_IDX]
-                    rg_cmd = action_16[RIGHT_GRIPPER_IDX]
-                    if not dry_run:
-                        gbuf = observer.get_gripper()
-                        lg_obs = float(gbuf["left"][-1]["pos"]) if gbuf["left"] else float("nan")
-                        rg_obs = float(gbuf["right"][-1]["pos"]) if gbuf["right"] else float("nan")
-                        print(f"  t={t:5d}  gripper cmd L={lg_cmd:.4f} R={rg_cmd:.4f}  obs L={lg_obs:.4f} R={rg_obs:.4f}")
+                        step += 1
+
+                    chunk_elapsed = time.time() - t0_chunk
+                    if chunk_idx > 0 and chunk_idx % 10 == 0:
+                        print(f"  chunk {chunk_idx} wall time {chunk_elapsed*1000:.0f}ms "
+                              f"(incl. {chunk_size} sends)")
+                    chunk_idx += 1
+            else:
+                for t in range(max_steps):
+                    t0 = time.time()
+
+                    image_tensor, left_s, right_s = _policy_inputs()
+
+                    all_actions, _ = policy(image_tensor, None, left_s, right_s)
+                    # all_actions: (1, chunk_size, action_dim)
+
+                    if t % 4 == 0:
+                        chunk_raw = all_actions[0].cpu().numpy()  # (chunk_size, action_dim)
+                        chunk_denorm = chunk_raw * stats["action_std"] + stats["action_mean"]
+                        lg_chunk = chunk_denorm[:, LEFT_GRIPPER_IDX]
+                        rg_chunk = chunk_denorm[:, RIGHT_GRIPPER_IDX]
+                        np.set_printoptions(precision=4, linewidth=200, suppress=True)
+                        print(f"  t={t:5d}  chunk L_grip={lg_chunk}")
+                        print(f"         chunk R_grip={rg_chunk}")
+
+                    if temporal_agg:
+                        raw = temporal_agg_step(
+                            all_time_actions, t,
+                            all_actions.cpu().numpy()[0],
+                            chunk_size,
+                        )
                     else:
-                        print(f"  t={t:5d}  gripper cmd L={lg_cmd:.4f} R={rg_cmd:.4f}")
+                        raw = all_actions[0, 0].cpu().numpy()
 
-                if t > 0 and t % 100 == 0:
-                    actual_hz = 1.0 / max(time.time() - t0, 1e-6)
-                    print(f"  step {t}/{max_steps}  loop={elapsed*1000:.1f}ms  ~{actual_hz:.0f}Hz")
+                    action_16 = postprocess_action(raw, stats)
+
+                    if dry_run:
+                        if t % 30 == 0:
+                            print(f"  t={t:4d}  L_q={action_16[:7].round(3)}  "
+                                  f"L_g={action_16[7]:.3f}  "
+                                  f"R_q={action_16[8:15].round(3)}  "
+                                  f"R_g={action_16[15]:.3f}")
+                    else:
+                        send_action(left_robot, right_robot, left_g, right_g,
+                                    action_16, args.max_vel, args.max_acc)
+
+                    elapsed = time.time() - t0
+                    sleep_time = dt - elapsed
+                    if sleep_time > 0:
+                        time.sleep(sleep_time)
+
+                    if t > 0 and t % 4 == 0:
+                        lg_cmd = action_16[LEFT_GRIPPER_IDX]
+                        rg_cmd = action_16[RIGHT_GRIPPER_IDX]
+                        if not dry_run:
+                            gbuf = observer.get_gripper()
+                            lg_obs = float(gbuf["left"][-1]["pos"]) if gbuf["left"] else float("nan")
+                            rg_obs = float(gbuf["right"][-1]["pos"]) if gbuf["right"] else float("nan")
+                            print(f"  t={t:5d}  gripper cmd L={lg_cmd:.4f} R={rg_cmd:.4f}  obs L={lg_obs:.4f} R={rg_obs:.4f}")
+                        else:
+                            print(f"  t={t:5d}  gripper cmd L={lg_cmd:.4f} R={rg_cmd:.4f}")
+
+                    if t > 0 and t % 100 == 0:
+                        actual_hz = 1.0 / max(time.time() - t0, 1e-6)
+                        print(f"  step {t}/{max_steps}  loop={elapsed*1000:.1f}ms  ~{actual_hz:.0f}Hz")
 
     except KeyboardInterrupt:
         print("\nStopped by user.")
@@ -591,6 +675,14 @@ def parse_args():
     p.add_argument("--home-plan", type=str, default=HOME_PLAN, help="Home plan name")
     p.add_argument("--dry-run", action="store_true",
                    help="Print actions without connecting to hardware")
+    p.add_argument(
+        "--blocking-chunk",
+        action="store_true",
+        help=(
+            "Run one policy forward per chunk, send chunk_size consecutive targets "
+            "(at --freq), then re-observe and predict again. Disables temporal aggregation."
+        ),
+    )
     return p.parse_args()
 
 

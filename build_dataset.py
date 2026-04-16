@@ -23,8 +23,8 @@ import h5py
 import numpy as np
 
 
-CAM_NAMES = ["left_cam0", "left_cam1", "right_cam0", "right_cam1", "top_cam"]
-REF_CAM = "left_cam0"
+CAM_NAMES = ["left_cam1", "right_cam0", "top_cam"]
+REF_CAM = "left_cam1"
 TARGET_SIZE = (640, 480)
 RESIZE_CAMS = {"top_cam"}
 
